@@ -1,0 +1,32 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dist/
+build/
+*.egg-info/
+.vscode/
+bin/*.dll
+bin/*.pdb
+bin/*.exp
+bin/*.lib
+
+# Training artifacts / large files
+logs/
+Self_Play_Games/
+_selfplay_tmp/
+*.log
+*.jsonl
+*.pgn
+*.pt
+*.pt.prev
+*.ckpt
+
+# Runtime locks / scratch
+.az_loop.lock
+*.lock
+_tmp_*
