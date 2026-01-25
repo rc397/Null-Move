@@ -12,6 +12,53 @@ from .az_features import move_to_action
 from .az_net import AZNet
 
 
+# Hard-coded piece values for capture/promotion bonuses.
+# These help guide the policy when the NN has random or weak weights.
+_PIECE_VALUES: dict[int, float] = {
+    chess.PAWN: 1.0,
+    chess.KNIGHT: 3.0,
+    chess.BISHOP: 3.25,
+    chess.ROOK: 5.0,
+    chess.QUEEN: 9.0,
+    chess.KING: 0.0,  # Can't capture the king in legal moves
+}
+
+
+def _capture_bonus(board: chess.Board, move: chess.Move) -> float:
+    """Return a bonus score for captures and promotions.
+
+    This injects chess knowledge into the policy priors so that even with
+    random NN weights, the AI will consider captures seriously.
+    """
+    bonus = 0.0
+
+    # Capture bonus: value of captured piece (MVV - Most Valuable Victim)
+    if board.is_capture(move):
+        # En passant captures a pawn
+        if board.is_en_passant(move):
+            bonus += _PIECE_VALUES[chess.PAWN]
+        else:
+            captured = board.piece_type_at(move.to_square)
+            if captured is not None:
+                bonus += _PIECE_VALUES.get(captured, 0.0)
+                # Extra bonus for capturing with a less valuable piece (LVA - Least Valuable Attacker)
+                attacker = board.piece_type_at(move.from_square)
+                if attacker is not None and attacker < captured:
+                    bonus += 0.5  # Small bonus for good trades
+
+    # Promotion bonus: gaining material
+    if move.promotion is not None:
+        bonus += _PIECE_VALUES.get(move.promotion, 0.0) - _PIECE_VALUES[chess.PAWN]
+
+    # Check bonus: putting opponent in check is often good
+    board.push(move)
+    if board.is_check():
+        bonus += 0.5
+    board.pop()
+
+    return bonus
+
+
 @dataclass
 class EdgeStats:
     prior: float
@@ -60,6 +107,9 @@ class MCTS:
         self._expand_topk: int = 0
         self._pw_alpha: float = 0.0
         self._pw_beta: float = 0.5
+        # Capture bonus scale: how much to boost captures/promotions in the policy prior.
+        # Higher values (e.g., 2.0) help with random weights; can decrease as NN improves.
+        self._capture_bonus_scale: float = 0.0
 
     def clear(self) -> None:
         self._tree.clear()
@@ -81,6 +131,7 @@ class MCTS:
         expand_topk: int = 0,
         pw_alpha: float = 0.0,
         pw_beta: float = 0.5,
+        capture_bonus_scale: float = 5.0,
     ) -> dict[chess.Move, int]:
         """Run MCTS from this position and return visit counts per legal move."""
 
@@ -88,6 +139,9 @@ class MCTS:
         self._expand_topk = max(0, int(expand_topk))
         self._pw_alpha = max(0.0, float(pw_alpha))
         self._pw_beta = max(0.0, float(pw_beta))
+        # Capture bonus scale: how much to boost captures/promotions.
+        # Default 5.0 helps with random/weak NN weights; can reduce as training progresses.
+        self._capture_bonus_scale = max(0.0, float(capture_bonus_scale))
 
         root_key = board._transposition_key()
         root = self._tree.get(root_key)
@@ -255,7 +309,13 @@ class MCTS:
         scores: list[float] = []
         for m in legal:
             a = move_to_action(m)
-            scores.append(float(logits[a].item()))
+            # Start with NN logit
+            score = float(logits[a].item())
+            # Add capture/promotion/check bonus to guide random-weight NNs
+            # The bonus is scaled to be meaningful relative to typical logit ranges
+            bonus = _capture_bonus(board, m)
+            score += bonus * self._capture_bonus_scale
+            scores.append(score)
         priors = _softmax(scores)
 
         # Sort moves by prior desc.

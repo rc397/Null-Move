@@ -28,5 +28,10 @@ _selfplay_tmp/
 
 # Runtime locks / scratch
 .az_loop.lock
+.az_state.json
 *.lock
 _tmp_*
+
+# Local-only / external assets
+Opening Book/
+~/

@@ -158,7 +158,24 @@ def train_once(
             total_policy += float(pol_loss_t.item())
             total_value += float(val_loss.item())
 
-        print(f"epoch {epoch}: policy {total_policy:.4f} value {total_value:.4f}")
+        # Detailed analysis output explaining what each metric means
+        batches = (n + batch - 1) // batch
+        avg_policy = total_policy / batches if batches > 0 else 0
+        avg_value = total_value / batches if batches > 0 else 0
+        
+        print(f"  epoch {epoch}/{epochs}: "
+              f"policy_loss={avg_policy:.4f} (lower=better move predictions) | "
+              f"value_loss={avg_value:.4f} (lower=better win/loss predictions)")
+
+    # Summary of what was analyzed
+    print(f"\n=== Training Analysis Summary ===")
+    print(f"  Positions analyzed: {n:,} chess positions from self-play games")
+    print(f"  Policy head: Learns which moves are good (trained on MCTS visit distributions)")
+    print(f"  Value head: Learns who is winning (trained on actual game outcomes)")
+    print(f"  Material head: Learns piece counting (auxiliary objective, weight={material_weight})")
+    print(f"  Epochs completed: {epochs} passes through the dataset")
+    print(f"  Batch size: {batch} positions per gradient update")
+    print(f"=================================\n")
 
     torch.save(net.model.state_dict(), str(out_weights))
     print(f"wrote {out_weights}")

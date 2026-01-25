@@ -25,7 +25,7 @@ if (-not (Test-Path $Runner)) {
 $openArg = ""
 if ($OpenVSCode) { $openArg = " -OpenVSCode" }
 
-$tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$Runner`"$openArg"
+$tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Runner`"$openArg -NoTail"
 
 # Create/replace a task that runs at logon for the current user.
 # (Runs when you boot + log in. Startup-without-login usually requires admin/service.)

@@ -22,11 +22,11 @@ $StartTask = "$TaskPrefix-Train-Start"
 $StopTask = "$TaskPrefix-Train-Stop"
 
 $startCmd = if ($OpenVSCode) {
-    # Opens VS Code on the workspace; auto-start training via .vscode/tasks.json
-    "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Root\scripts\install_startup_autorun.ps1`""
+    # Single canonical entrypoint; optionally opens VS Code too.
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Root\scripts\start_training.ps1`" -OpenVSCode -NoTail"
 } else {
     # Starts training directly (more reliable than VS Code integration)
-    "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Root\scripts\start_training.ps1`""
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Root\scripts\start_training.ps1`" -NoTail"
 }
 
 $stopCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Root\scripts\stop_training.ps1`""

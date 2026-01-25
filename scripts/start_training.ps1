@@ -1,3 +1,17 @@
+#& .\scripts\start_training.ps1 -Iters 1000000 -GamesPerIter 100 -Sims 200 -BatchSize 256 -SelfplayWorkers 6 -MaxPlies 250 -TrainEpochs 1 -TrainBatch 1024 -Lr 0.001 -ReplayMax 2000000 -PolicyTopK 128 -EvalGames 20 -EvalEvery 1 -EvalEveryGames 50 -EvalSims 500 -EvalBatchSize 32 -EvalOpeningPlies 6 -DrawValue -0.2 -RepeatPenalty 0.10 -RepeatWindow 12 -NetChannels 128 -NetBlocks 10 -PgnEvery 100
+
+
+
+
+
+
+
+
+
+
+
+
+
 param(
     [int]$Iters = 1000000,
     [int]$GamesPerIter = 100,
@@ -39,7 +53,11 @@ param(
 
     # Save checkpoint PGNs into Self_Play_Games.
     # Note: with multi-process self-play, PGNs are merged safely after workers finish.
-    [int]$PgnEvery = 100,
+    [int]$PgnEvery = 50,
+
+    # Legacy: apply --pgn-every to each worker's local game counter.
+    # Default is global cadence (every N total self-play games).
+    [switch]$PgnEveryPerWorker,
 
     # Exploration knobs (to avoid repeating the same games)
     [int]$TempPlies = 30,
@@ -191,6 +209,10 @@ $args += @(
 
 if ($ClearTreeEveryMove) {
     $args += "--clear-tree-every-move"
+}
+
+if ($PgnEveryPerWorker) {
+    $args += "--pgn-every-per-worker"
 }
 
 Write-Host "Starting NullMove AZ training..." 

@@ -6,9 +6,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Root = "D:\NullMove"
-$Opener = Join-Path $Root "scripts\open_vscode.ps1"
-if (-not (Test-Path $Opener)) {
-    throw "Missing: $Opener"
+$Runner = Join-Path $Root "scripts\start_training.ps1"
+if (-not (Test-Path $Runner)) {
+    throw "Missing: $Runner"
 }
 
 if ($Remove) {
@@ -17,7 +17,7 @@ if ($Remove) {
     exit 0
 }
 
-$tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Opener`""
+$tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Runner`" -OpenVSCode -NoTail"
 
 # Run at logon (more reliable than Startup folder when Startup apps are restricted).
 schtasks /Create /F /TN $TaskName /SC ONLOGON /RL LIMITED /TR $tr | Out-Null

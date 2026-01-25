@@ -21,18 +21,18 @@ if ($Remove) {
 }
 
 # Use Hidden to avoid an annoying console window every login.
-# This opens VS Code on the workspace; the task in .vscode/tasks.json auto-starts training in the VS Code terminal.
-$opener = Join-Path $Root "scripts\open_vscode.ps1"
-if (-not (Test-Path $opener)) {
-    throw "Missing: $opener"
+# Use the same launcher as manual runs, so startup and manual behavior match.
+$runner = Join-Path $Root "scripts\start_training.ps1"
+if (-not (Test-Path $runner)) {
+    throw "Missing: $runner"
 }
 
 $cmd = @(
 "@echo off",
-"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$opener`""
+"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runner`" -OpenVSCode -NoTail"
 ) -join "`r`n"
 
 Set-Content -Path $cmdPath -Value $cmd -Encoding ASCII
 Write-Host "Installed startup autorun: $cmdPath"
-Write-Host "It will open VS Code after you log in."
-Write-Host "Training will start in the VS Code terminal via the auto-run task."
+Write-Host "It will start training after you log in."
+Write-Host "(VS Code will open too, because -OpenVSCode is enabled.)"

@@ -69,7 +69,7 @@ def main() -> None:
     ap.add_argument("--games", type=int, default=2)
     ap.add_argument("--depth", type=int, default=6)
     ap.add_argument("--movetime", type=int, default=0, help="ms per move (0 = use depth)")
-    ap.add_argument("--out", default=str(Path("D:/NullMove/Self_Play_Games/selfplay.pgn")))
+    ap.add_argument("--out", default=str(Path("D:/NullMove/Self_Play_Games/smoke_selfplay.pgn")))
     args = ap.parse_args(rest)
 
     out_path = Path(args.out)

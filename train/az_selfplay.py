@@ -9,6 +9,7 @@ from pathlib import Path
 
 import chess
 import chess.pgn
+import chess.polyglot
 
 # Allow running as a script without requiring `pip install -e .`
 import sys
@@ -48,18 +49,36 @@ def _material_from_pov(board: chess.Board) -> float:
 
 
 def _append_pgn_game(path: Path, game: chess.pgn.Game) -> None:
+    import time
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as pf:
-        pf.write(str(game))
-        pf.write("\n\n")
+    for attempt in range(5):
+        try:
+            with path.open("a", encoding="utf-8") as pf:
+                pf.write(str(game))
+                pf.write("\n\n")
+            return
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(0.5)
+            else:
+                print(f"Warning: Could not write to {path} after 5 attempts")
 
 
 def _append_pgn_text(path: Path, text: str) -> None:
+    import time
     if not text:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as pf:
-        pf.write(text)
+    for attempt in range(5):
+        try:
+            with path.open("a", encoding="utf-8") as pf:
+                pf.write(text)
+            return
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(0.5)
+            else:
+                print(f"Warning: Could not write to {path} after 5 attempts")
 
 
 def _trim_pgn_games(path: Path, keep_last: int) -> None:
@@ -79,6 +98,37 @@ def _trim_pgn_games(path: Path, keep_last: int) -> None:
         for g in games_list:
             pf.write(str(g))
             pf.write("\n\n")
+
+
+def _has_promotion(moves: list[chess.Move] | list[str]) -> bool:
+    """Check if any move in the game is a promotion."""
+    for mv in moves:
+        if isinstance(mv, str):
+            # UCI string like "e7e8q"
+            if len(mv) == 5 and mv[4] in "qrbnQRBN":
+                return True
+        else:
+            # chess.Move object
+            if mv.promotion is not None:
+                return True
+    return False
+
+
+def _get_book_move(board: chess.Board, book_path: Path | None, rng: random.Random) -> chess.Move | None:
+    """Return a weighted random book move if available, else None."""
+    if book_path is None or not book_path.exists():
+        return None
+    try:
+        with chess.polyglot.open_reader(str(book_path)) as reader:
+            entries = list(reader.find_all(board))
+            if entries:
+                # Weight by book weight (popularity/quality)
+                moves = [e.move for e in entries]
+                weights = [e.weight for e in entries]
+                return rng.choices(moves, weights=weights, k=1)[0]
+    except Exception:
+        pass
+    return None
 
 
 def _append_line_locked(path: Path, line: str) -> None:
@@ -107,6 +157,35 @@ def _append_line_locked(path: Path, line: str) -> None:
         # Fallback: best-effort append.
         with path.open("a", encoding="utf-8") as f:
             f.write(line.rstrip("\n") + "\n")
+            f.flush()
+
+
+def _append_jsonl_locked(path: Path, lines: list[str]) -> None:
+    """Append multiple JSONL lines atomically using file lock (Windows-friendly)."""
+    if not lines:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    
+    text = "\n".join(line.rstrip("\n") for line in lines) + "\n"
+    
+    try:
+        import msvcrt  # type: ignore
+        
+        with path.open("a+", encoding="utf-8") as f:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            except Exception:
+                pass
+            f.write(text)
+            f.flush()
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass
+    except Exception:
+        # Fallback: best-effort append
+        with path.open("a", encoding="utf-8") as f:
+            f.write(text)
             f.flush()
 
 
@@ -145,6 +224,10 @@ def generate_selfplay(
     pgn_every: int = 1,
     pgn_record_wins: bool = True,
     pgn_wins_out: Path | None = None,
+    pgn_record_promos: bool = True,
+    pgn_promos_out: Path | None = None,
+    book_path: Path | None = None,
+    book_plies: int = 0,
     game_index_base: int = 0,
     dirichlet_alpha: float = 0.3,
     dirichlet_eps: float = 0.25,
@@ -171,12 +254,19 @@ def generate_selfplay(
     live_log_header: bool = True,
     emit_stdout: bool = True,
     pgn_every_per_worker: bool = False,
+    capture_bonus_scale: float = 2.0,
 ) -> int:
     wins_out_eff: Path | None = None
     if pgn_out is not None and bool(pgn_record_wins):
         wins_out_eff = pgn_wins_out
         if wins_out_eff is None:
             wins_out_eff = pgn_out.with_name(pgn_out.stem + "_wins" + pgn_out.suffix)
+
+    promos_out_eff: Path | None = None
+    if pgn_out is not None and bool(pgn_record_promos):
+        promos_out_eff = pgn_promos_out
+        if promos_out_eff is None:
+            promos_out_eff = pgn_out.with_name(pgn_out.stem + "_promos" + pgn_out.suffix)
 
     if int(workers) > 1:
         return _generate_selfplay_parallel(
@@ -194,7 +284,11 @@ def generate_selfplay(
             pgn_every=pgn_every,
             pgn_record_wins=bool(pgn_record_wins),
             pgn_wins_out=wins_out_eff,
+            pgn_record_promos=bool(pgn_record_promos),
+            pgn_promos_out=promos_out_eff,
             pgn_every_per_worker=bool(pgn_every_per_worker),
+            book_path=book_path,
+            book_plies=book_plies,
             game_index_base=game_index_base,
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_eps=dirichlet_eps,
@@ -218,6 +312,7 @@ def generate_selfplay(
             net_amp=bool(net_amp),
             live_log=live_log,
             live_log_master=live_log_master,
+            capture_bonus_scale=float(capture_bonus_scale),
         )
 
     if live_log is not None:
@@ -364,6 +459,33 @@ def generate_selfplay(
                 if board.is_game_over(claim_draw=True):
                     break
 
+                # === OPENING BOOK: Use book move if within book_plies ===
+                book_move: chess.Move | None = None
+                if book_path is not None and int(book_plies) > 0 and ply < int(book_plies):
+                    book_move = _get_book_move(board, book_path, rng)
+                
+                if book_move is not None and book_move in board.legal_moves:
+                    # Use book move directly (no MCTS, but still record for training)
+                    move = book_move
+                    # Create a "perfect" policy target: 100% on the book move
+                    pi: dict[int, float] = {move_to_action(move): 1.0}
+                    states.append((board.fen(), board.turn == chess.WHITE, pi, _material_from_pov(board)))
+                    
+                    board.push(move)
+                    moves_uci.append(move.uci())
+                    if pgn_node is not None:
+                        pgn_node = pgn_node.add_variation(move)
+                    
+                    if rw > 0:
+                        k = board._transposition_key()
+                        recent_keys.append(k)
+                        _remember(k)
+                        if len(recent_keys) > rw:
+                            old = recent_keys.pop(0)
+                            _forget(old)
+                    continue  # Skip MCTS for this ply
+
+                # === MCTS SEARCH (normal path) ===
                 if clear_tree_every_move:
                     mcts.clear()
 
@@ -384,6 +506,8 @@ def generate_selfplay(
                     expand_topk=32,
                     pw_alpha=1.5,
                     pw_beta=0.5,
+                    # Capture bonus helps with random/weak NN weights
+                    capture_bonus_scale=capture_bonus_scale,
                 )
 
                 if not visits:
@@ -503,6 +627,18 @@ def generate_selfplay(
                 if int(pgn_max_games) > 0:
                     _trim_pgn_games(wins_out_eff, int(pgn_max_games))
 
+            # Record games with promotions (milestone: shows AI learned pawn advancement).
+            if promos_out_eff is not None and _has_promotion(moves_uci):
+                pg = pgn_game if pgn_game is not None else _build_pgn_from_moves(moves_uci)
+                pg.headers["Event"] = "NullMove AZ Self-Play (Promotions)"
+                pg.headers["Date"] = dt.date.today().isoformat()
+                pg.headers["Result"] = res
+                pg.headers["PlyCount"] = str(board.ply())
+                pg.headers["GameIndex"] = str(int(game_index_base) + g)
+                _append_pgn_game(promos_out_eff, pg)
+                if int(pgn_max_games) > 0:
+                    _trim_pgn_games(promos_out_eff, int(pgn_max_games))
+
             for fen, stm_is_white, pi, mat in states:
                 # If we want to punish draws, do it symmetrically: both sides see a negative target.
                 if is_draw:
@@ -578,6 +714,13 @@ def main() -> None:
         help="How many recent positions to consider for repeat-penalty (0 disables)",
     )
 
+    ap.add_argument(
+        "--capture-bonus-scale",
+        type=float,
+        default=5.0,
+        help="Scale factor for capture/promotion/check bonus in policy priors (0 disables, 5.0 helps with weak NNs)",
+    )
+
     ap.add_argument("--resign-threshold", type=float, default=999.0, help="Set < 0 to enable early resign (disabled by default)")
     ap.add_argument("--resign-plies", type=int, default=8)
     gpm = ap.add_mutually_exclusive_group()
@@ -621,6 +764,7 @@ def main() -> None:
         repeat_window=int(args.repeat_window),
         workers=int(getattr(args, "workers", 1)),
         live_log=(Path(args.live_log) if str(getattr(args, "live_log", "")).strip() else None),
+        capture_bonus_scale=float(args.capture_bonus_scale),
     )
 
 
@@ -650,7 +794,11 @@ def _generate_selfplay_parallel(
     pgn_every: int,
     pgn_record_wins: bool,
     pgn_wins_out: Path | None,
+    pgn_record_promos: bool,
+    pgn_promos_out: Path | None,
     pgn_every_per_worker: bool,
+    book_path: Path | None,
+    book_plies: int,
     game_index_base: int,
     dirichlet_alpha: float,
     dirichlet_eps: float,
@@ -674,6 +822,7 @@ def _generate_selfplay_parallel(
     net_amp: bool,
     live_log: Path | None,
     live_log_master: Path | None,
+    capture_bonus_scale: float = 2.0,
 ) -> int:
     import multiprocessing as mp
 
@@ -694,7 +843,11 @@ def _generate_selfplay_parallel(
             pgn_every=pgn_every,
             pgn_record_wins=bool(pgn_record_wins),
             pgn_wins_out=pgn_wins_out,
+            pgn_record_promos=bool(pgn_record_promos),
+            pgn_promos_out=pgn_promos_out,
             pgn_every_per_worker=bool(pgn_every_per_worker),
+            book_path=book_path,
+            book_plies=book_plies,
             game_index_base=game_index_base,
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_eps=dirichlet_eps,
@@ -716,11 +869,91 @@ def _generate_selfplay_parallel(
             net_channels=net_channels,
             net_blocks=net_blocks,
             net_amp=net_amp,
+            capture_bonus_scale=capture_bonus_scale,
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = out_path.parent / "_selfplay_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Recovery: if a previous parallel self-play run was interrupted before the deterministic merge,
+    # stale chunk files can be left behind. Merge them now so progress (dataset/PGN) isn't lost.
+    try:
+        import shutil
+
+        stale_jsonl = sorted(tmp_dir.glob("chunk_*.jsonl"))
+        if stale_jsonl:
+            merged_bytes = 0
+            with out_path.open("a", encoding="utf-8") as out_f:
+                for p in stale_jsonl:
+                    try:
+                        with p.open("r", encoding="utf-8") as src:
+                            shutil.copyfileobj(src, out_f)
+                        merged_bytes += int(p.stat().st_size)
+                    finally:
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+            print(
+                f"=== [{_ts_now()}] selfplay(recover) merged stale jsonl chunks={len(stale_jsonl)} bytes={merged_bytes} ===",
+                flush=True,
+            )
+
+        if pgn_out is not None:
+            stale_pgn = sorted(tmp_dir.glob("chunk_*.pgn"))
+            if stale_pgn:
+                for p in stale_pgn:
+                    try:
+                        _append_pgn_text(pgn_out, p.read_text(encoding="utf-8"))
+                    finally:
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+                _trim_pgn_games(pgn_out, int(pgn_max_games))
+                print(
+                    f"=== [{_ts_now()}] selfplay(recover) merged stale pgn chunks={len(stale_pgn)} -> {pgn_out} ===",
+                    flush=True,
+                )
+
+        if pgn_wins_out is not None and bool(pgn_record_wins):
+            stale_wins = sorted(tmp_dir.glob("chunk_*.wins.pgn"))
+            if stale_wins:
+                for p in stale_wins:
+                    try:
+                        _append_pgn_text(pgn_wins_out, p.read_text(encoding="utf-8"))
+                    finally:
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+                if int(pgn_max_games) > 0:
+                    _trim_pgn_games(pgn_wins_out, int(pgn_max_games))
+                print(
+                    f"=== [{_ts_now()}] selfplay(recover) merged stale wins chunks={len(stale_wins)} -> {pgn_wins_out} ===",
+                    flush=True,
+                )
+
+        if pgn_promos_out is not None and bool(pgn_record_promos):
+            stale_promos = sorted(tmp_dir.glob("chunk_*.promos.pgn"))
+            if stale_promos:
+                for p in stale_promos:
+                    try:
+                        _append_pgn_text(pgn_promos_out, p.read_text(encoding="utf-8"))
+                    finally:
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+                if int(pgn_max_games) > 0:
+                    _trim_pgn_games(pgn_promos_out, int(pgn_max_games))
+                print(
+                    f"=== [{_ts_now()}] selfplay(recover) merged stale promos chunks={len(stale_promos)} -> {pgn_promos_out} ===",
+                    flush=True,
+                )
+    except Exception:
+        pass
 
     # If a live_log is provided, treat it as the master combined log and also emit per-worker logs.
     live_log_master_eff = live_log_master
@@ -756,6 +989,9 @@ def _generate_selfplay_parallel(
         this_pgn_wins = None
         if pgn_wins_out is not None and bool(pgn_record_wins):
             this_pgn_wins = tmp_dir / f"chunk_{wi}_{seed}.wins.pgn"
+        this_pgn_promos = None
+        if pgn_promos_out is not None and bool(pgn_record_promos):
+            this_pgn_promos = tmp_dir / f"chunk_{wi}_{seed}.promos.pgn"
         # Per-worker live log (optional) + a shared master log.
         worker_live_log: Path | None = None
         if live_log_eff is not None:
@@ -785,10 +1021,14 @@ def _generate_selfplay_parallel(
                 seed=int(seed) + wi * 1337,
                 pgn_out=this_pgn,
                 pgn_wins_out=this_pgn_wins,
+                pgn_promos_out=this_pgn_promos,
                 pgn_max_games=pgn_max_games,
                 pgn_every=pgn_every,
                 pgn_record_wins=bool(pgn_record_wins),
+                pgn_record_promos=bool(pgn_record_promos),
                 pgn_every_per_worker=bool(pgn_every_per_worker),
+                book_path=book_path,
+                book_plies=book_plies,
                 game_index_base=game_cursor,
                 dirichlet_alpha=dirichlet_alpha,
                 dirichlet_eps=dirichlet_eps,
@@ -811,6 +1051,7 @@ def _generate_selfplay_parallel(
                 net_amp=net_amp,
                 live_log=worker_live_log,
                 live_log_master=live_log_master_eff,
+                capture_bonus_scale=capture_bonus_scale,
             )
         )
         game_cursor += int(gcount)
@@ -904,6 +1145,25 @@ def _generate_selfplay_parallel(
         if int(pgn_max_games) > 0:
             _trim_pgn_games(pgn_wins_out, int(pgn_max_games))
 
+    # Merge promotion PGN chunks deterministically.
+    if pgn_promos_out is not None and bool(pgn_record_promos):
+        for j in jobs:
+            pgn_chunk = j.get("pgn_promos_out")
+            if not pgn_chunk:
+                continue
+            pp = Path(pgn_chunk)
+            if not pp.exists():
+                continue
+            try:
+                _append_pgn_text(pgn_promos_out, pp.read_text(encoding="utf-8"))
+            finally:
+                try:
+                    pp.unlink()
+                except Exception:
+                    pass
+        if int(pgn_max_games) > 0:
+            _trim_pgn_games(pgn_promos_out, int(pgn_max_games))
+
     try:
         # Clean directory if empty.
         if not any(tmp_dir.iterdir()):
@@ -912,6 +1172,592 @@ def _generate_selfplay_parallel(
         pass
 
     return int(sum(written_parts))
+
+
+# ============================================================================
+# STREAMING PARALLEL MODE: Workers play in parallel, push data sequentially
+# ============================================================================
+
+
+def _play_single_game(
+    *,
+    weights_path: Path,
+    sims: int,
+    batch_size: int,
+    c_puct: float,
+    max_plies: int,
+    temp_plies: int,
+    seed: int,
+    game_index: int,
+    dirichlet_alpha: float,
+    dirichlet_eps: float,
+    temp_init: float,
+    temp_final: float,
+    sample_p_after_temp: float,
+    clear_tree_every_move: bool,
+    adjudicate_draw: bool,
+    draw_value_threshold: float,
+    draw_plies: int,
+    draw_min_ply: int,
+    resign_threshold: float | None,
+    resign_plies: int,
+    draw_value: float,
+    repeat_penalty: float,
+    repeat_window: int,
+    net_channels: int,
+    net_blocks: int,
+    net_amp: bool,
+    capture_bonus_scale: float,
+    book_path: Path | None = None,
+    book_plies: int = 0,
+    net: "AZNet | None" = None,
+    mcts: "MCTS | None" = None,
+) -> dict:
+    """
+    Play a single self-play game and return the result data.
+    
+    Returns dict with:
+        - jsonl_lines: list of JSONL strings to append to dataset
+        - pgn_text: PGN string (or None)
+        - result: game result string
+        - moves_uci: list of moves
+        - elapsed_s: time taken
+        - examples: number of training examples
+    """
+    import io
+    
+    rng = random.Random(seed)
+    
+    # Create net/mcts if not provided (first call in worker)
+    if net is None:
+        net = AZNet(
+            weights_path=str(weights_path),
+            channels=int(net_channels),
+            blocks=int(net_blocks),
+            use_amp=bool(net_amp),
+        )
+    if mcts is None:
+        mcts = MCTS(net)
+    
+    t0 = time.time()
+    board = chess.Board()
+    states: list[tuple[str, bool, dict[int, float], float]] = []
+    moves_uci: list[str] = []
+    recent_hashes: list[int] = []
+    
+    pgn_game = chess.pgn.Game()
+    pgn_node = pgn_game
+    
+    resign_streak = 0
+    adjudicated_result: str | None = None
+    
+    while not board.is_game_over(claim_draw=True):
+        if board.ply() >= int(max_plies):
+            adjudicated_result = "1/2-1/2"
+            break
+        
+        fen = board.fen()
+        mat = _material_from_pov(board)
+        ply = board.ply()
+        
+        # === OPENING BOOK: Use book move if within book_plies ===
+        book_move: chess.Move | None = None
+        if book_path is not None and int(book_plies) > 0 and ply < int(book_plies):
+            book_move = _get_book_move(board, book_path, rng)
+        
+        if book_move is not None and book_move in board.legal_moves:
+            # Use book move directly (no MCTS, but still record for training)
+            move = book_move
+            # Create a "perfect" policy target: 100% on the book move
+            pi: dict[int, float] = {move_to_action(move): 1.0}
+            states.append((fen, board.turn == chess.WHITE, pi, mat))
+            
+            board.push(move)
+            moves_uci.append(move.uci())
+            recent_hashes.append(board.zobrist_hash())
+            pgn_node = pgn_node.add_variation(move)
+            continue  # Skip MCTS for this ply
+        
+        # === MCTS SEARCH (normal path) ===
+        # Repeat penalty
+        penalty_actions: set[int] = set()
+        if float(repeat_penalty) > 0 and int(repeat_window) > 0:
+            for mv in board.legal_moves:
+                board.push(mv)
+                h = board.zobrist_hash()
+                board.pop()
+                if h in recent_hashes[-int(repeat_window):]:
+                    penalty_actions.add(move_to_action(mv))
+        
+        # MCTS search
+        pi = mcts.run(
+            board,
+            simulations=int(sims),
+            batch_size=int(batch_size),
+            c_puct=float(c_puct),
+            dirichlet_alpha=float(dirichlet_alpha),
+            dirichlet_eps=float(dirichlet_eps),
+            penalty_actions=penalty_actions,
+            penalty_factor=(1.0 - float(repeat_penalty)) if penalty_actions else 1.0,
+            capture_bonus_scale=float(capture_bonus_scale),
+        )
+        
+        if bool(clear_tree_every_move):
+            mcts.clear_tree()
+        
+        states.append((fen, board.turn == chess.WHITE, dict(pi), mat))
+        
+        # Temperature-based sampling
+        if ply < int(temp_plies):
+            frac = float(ply) / max(1, int(temp_plies))
+            temp = float(temp_init) + frac * (float(temp_final) - float(temp_init))
+            probs = {a: p ** (1.0 / max(temp, 0.01)) for a, p in pi.items()}
+            total = sum(probs.values())
+            probs = {a: p / total for a, p in probs.items()}
+            use_temp = True
+        else:
+            use_temp = rng.random() < float(sample_p_after_temp)
+            if use_temp:
+                probs = {a: p ** (1.0 / max(float(temp_final), 0.01)) for a, p in pi.items()}
+                total = sum(probs.values())
+                probs = {a: p / total for a, p in probs.items()}
+            else:
+                probs = pi
+        
+        if use_temp:
+            actions = list(probs.keys())
+            weights = list(probs.values())
+            chosen = rng.choices(actions, weights=weights, k=1)[0]
+        else:
+            chosen = max(probs, key=probs.get)
+        
+        # Convert action to move
+        from nullmove.az_features import action_to_move
+        move = action_to_move(board, chosen)
+        
+        board.push(move)
+        moves_uci.append(move.uci())
+        recent_hashes.append(board.zobrist_hash())
+        pgn_node = pgn_node.add_variation(move)
+        
+        # Draw adjudication
+        if bool(adjudicate_draw) and board.ply() >= int(draw_min_ply):
+            _logits, v_now = net.infer(board)
+            if abs(float(v_now)) <= float(draw_value_threshold):
+                if not hasattr(board, "_draw_streak"):
+                    board._draw_streak = 0
+                board._draw_streak += 1
+                if board._draw_streak >= int(draw_plies):
+                    adjudicated_result = "1/2-1/2"
+                    break
+            else:
+                board._draw_streak = 0
+        
+        # Resign check
+        if resign_threshold is not None and board.ply() >= int(draw_min_ply):
+            _logits, v_now = net.infer(board)
+            if float(v_now) <= float(resign_threshold):
+                resign_streak += 1
+            else:
+                resign_streak = 0
+            if resign_streak >= int(resign_plies):
+                adjudicated_result = "0-1" if board.turn == chess.WHITE else "1-0"
+                break
+    
+    res = adjudicated_result or board.result(claim_draw=True)
+    z_white = result_to_value(res)
+    is_draw = res == "1/2-1/2"
+    elapsed = time.time() - t0
+    
+    # Build JSONL lines
+    jsonl_lines = []
+    for fen, stm_is_white, pi, mat in states:
+        if is_draw:
+            z = float(draw_value)
+        else:
+            z = z_white if stm_is_white else -z_white
+        policy_sparse = [[int(a), float(p)] for a, p in pi.items()]
+        jsonl_lines.append(json.dumps({"fen": fen, "policy": policy_sparse, "z": float(z), "m": float(mat)}))
+    
+    # Build PGN
+    pgn_game.headers["Event"] = "NullMove AZ Self-Play"
+    pgn_game.headers["Date"] = dt.date.today().isoformat()
+    pgn_game.headers["Result"] = res
+    pgn_game.headers["PlyCount"] = str(board.ply())
+    pgn_game.headers["GameIndex"] = str(game_index)
+    
+    pgn_buf = io.StringIO()
+    pgn_buf.write(str(pgn_game))
+    pgn_buf.write("\n\n")
+    
+    # Check if game has any promotions (milestone indicator)
+    has_promo = _has_promotion(moves_uci)
+    
+    return {
+        "jsonl_lines": jsonl_lines,
+        "pgn_text": pgn_buf.getvalue(),
+        "result": res,
+        "moves_uci": moves_uci,
+        "elapsed_s": elapsed,
+        "examples": len(states),
+        "game_index": game_index,
+        "has_promotion": has_promo,
+        "net": net,
+        "mcts": mcts,
+    }
+
+
+def _streaming_worker(
+    worker_id: int,
+    game_indices: list[int],
+    out_path: Path,
+    pgn_out: Path | None,
+    pgn_wins_out: Path | None,
+    pgn_promos_out: Path | None,
+    pgn_every: int,
+    live_log: Path | None,
+    weights_path: Path,
+    sims: int,
+    batch_size: int,
+    c_puct: float,
+    max_plies: int,
+    temp_plies: int,
+    base_seed: int,
+    dirichlet_alpha: float,
+    dirichlet_eps: float,
+    temp_init: float,
+    temp_final: float,
+    sample_p_after_temp: float,
+    clear_tree_every_move: bool,
+    adjudicate_draw: bool,
+    draw_value_threshold: float,
+    draw_plies: int,
+    draw_min_ply: int,
+    resign_threshold: float | None,
+    resign_plies: int,
+    draw_value: float,
+    repeat_penalty: float,
+    repeat_window: int,
+    net_channels: int,
+    net_blocks: int,
+    net_amp: bool,
+    capture_bonus_scale: float,
+    book_path: Path | None = None,
+    book_plies: int = 0,
+) -> int:
+    """
+    Streaming worker: plays games one at a time, pushes data immediately after each game.
+    Uses file locking to safely write to shared dataset.
+    """
+    written = 0
+    net = None
+    mcts = None
+    
+    for local_idx, game_index in enumerate(game_indices):
+        seed = base_seed + game_index * 1000 + worker_id
+        
+        result = _play_single_game(
+            weights_path=weights_path,
+            sims=sims,
+            batch_size=batch_size,
+            c_puct=c_puct,
+            max_plies=max_plies,
+            temp_plies=temp_plies,
+            seed=seed,
+            game_index=game_index,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_eps=dirichlet_eps,
+            temp_init=temp_init,
+            temp_final=temp_final,
+            sample_p_after_temp=sample_p_after_temp,
+            clear_tree_every_move=clear_tree_every_move,
+            adjudicate_draw=adjudicate_draw,
+            draw_value_threshold=draw_value_threshold,
+            draw_plies=draw_plies,
+            draw_min_ply=draw_min_ply,
+            resign_threshold=resign_threshold,
+            resign_plies=resign_plies,
+            draw_value=draw_value,
+            repeat_penalty=repeat_penalty,
+            repeat_window=repeat_window,
+            net_channels=net_channels,
+            net_blocks=net_blocks,
+            net_amp=net_amp,
+            capture_bonus_scale=capture_bonus_scale,
+            book_path=book_path,
+            book_plies=book_plies,
+            net=net,
+            mcts=mcts,
+        )
+        
+        # Reuse net/mcts for next game
+        net = result["net"]
+        mcts = result["mcts"]
+        
+        # === SEQUENTIAL PUSH: Acquire lock, write, release ===
+        # Push JSONL data
+        if result["jsonl_lines"]:
+            _append_jsonl_locked(out_path, result["jsonl_lines"])
+            written += len(result["jsonl_lines"])
+        
+        # Push PGN (respecting pgn_every)
+        if pgn_out is not None and pgn_every > 0:
+            if (game_index % pgn_every) == 0:
+                try:
+                    import msvcrt
+                    with pgn_out.open("a+", encoding="utf-8") as pf:
+                        try:
+                            msvcrt.locking(pf.fileno(), msvcrt.LK_LOCK, 1)
+                        except Exception:
+                            pass
+                        pf.write(result["pgn_text"])
+                        pf.flush()
+                        try:
+                            msvcrt.locking(pf.fileno(), msvcrt.LK_UNLCK, 1)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        
+        # Push wins PGN (decisive games only)
+        if pgn_wins_out is not None and result["result"] in ("1-0", "0-1"):
+            try:
+                import msvcrt
+                pgn_wins_out.parent.mkdir(parents=True, exist_ok=True)
+                with pgn_wins_out.open("a+", encoding="utf-8") as pf:
+                    try:
+                        msvcrt.locking(pf.fileno(), msvcrt.LK_LOCK, 1)
+                    except Exception:
+                        pass
+                    pf.write(result["pgn_text"])
+                    pf.flush()
+                    try:
+                        msvcrt.locking(pf.fileno(), msvcrt.LK_UNLCK, 1)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        
+        # Push promotion PGN (games with promotions - milestone!)
+        if pgn_promos_out is not None and result.get("has_promotion", False):
+            try:
+                import msvcrt
+                pgn_promos_out.parent.mkdir(parents=True, exist_ok=True)
+                with pgn_promos_out.open("a+", encoding="utf-8") as pf:
+                    try:
+                        msvcrt.locking(pf.fileno(), msvcrt.LK_LOCK, 1)
+                    except Exception:
+                        pass
+                    pf.write(result["pgn_text"])
+                    pf.flush()
+                    try:
+                        msvcrt.locking(pf.fileno(), msvcrt.LK_UNLCK, 1)
+                    except Exception:
+                        pass
+                print(f"[{_ts_now()}] worker {worker_id} game {game_index}: *** PROMOTION GAME *** (saved to promos PGN)")
+            except Exception:
+                pass
+        
+        # Log to live log
+        if live_log is not None:
+            line = _format_selfplay_line(
+                game_index=game_index,
+                result=result["result"],
+                moves_uci=result["moves_uci"],
+                elapsed_s=result["elapsed_s"],
+            )
+            _append_line_locked(live_log, line)
+        
+        # Print progress
+        promo_str = " [PROMO!]" if result.get("has_promotion", False) else ""
+        print(f"[{_ts_now()}] worker {worker_id} game {game_index}: {result['result']}{promo_str} "
+              f"examples={result['examples']} elapsed={result['elapsed_s']:.1f}s", flush=True)
+    
+    return written
+
+
+def _streaming_worker_entry(kwargs: dict) -> int:
+    """Entry point for streaming parallel worker (Windows spawn compatibility)."""
+    return _streaming_worker(**kwargs)
+
+
+def generate_selfplay_streaming(
+    *,
+    out_path: Path,
+    weights_path: Path,
+    games: int,
+    sims: int,
+    batch_size: int,
+    c_puct: float,
+    max_plies: int,
+    temp_plies: int,
+    seed: int,
+    pgn_out: Path | None,
+    pgn_wins_out: Path | None = None,
+    pgn_promos_out: Path | None = None,
+    pgn_every: int,
+    game_index_base: int,
+    dirichlet_alpha: float,
+    dirichlet_eps: float,
+    temp_init: float,
+    temp_final: float,
+    sample_p_after_temp: float,
+    clear_tree_every_move: bool,
+    adjudicate_draw: bool,
+    draw_value_threshold: float,
+    draw_plies: int,
+    draw_min_ply: int,
+    resign_threshold: float | None,
+    resign_plies: int,
+    draw_value: float,
+    repeat_penalty: float,
+    repeat_window: int,
+    workers: int,
+    net_channels: int,
+    net_blocks: int,
+    net_amp: bool,
+    live_log: Path | None,
+    capture_bonus_scale: float = 2.0,
+    book_path: Path | None = None,
+    book_plies: int = 0,
+) -> int:
+    """
+    Parallel self-play with STREAMING data push.
+    
+    Workers play games in parallel (fast GPU utilization), but push data 
+    SEQUENTIALLY using file locks (safe, no corruption).
+    
+    Pattern:
+    1. Worker finishes a game
+    2. Acquires file lock
+    3. Appends JSONL/PGN data
+    4. Releases lock
+    5. Starts next game
+    
+    This ensures training can consume data continuously while workers play.
+    """
+    import multiprocessing as mp
+    
+    w = max(1, int(workers))
+    total_games = int(games)
+    
+    if w <= 1 or total_games <= 1:
+        # Fall back to single-threaded
+        return generate_selfplay(
+            out_path=out_path,
+            weights_path=weights_path,
+            games=games,
+            sims=sims,
+            batch_size=batch_size,
+            c_puct=c_puct,
+            max_plies=max_plies,
+            temp_plies=temp_plies,
+            seed=seed,
+            pgn_out=pgn_out,
+            pgn_max_games=0,
+            pgn_every=pgn_every,
+            pgn_every_per_worker=False,
+            game_index_base=game_index_base,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_eps=dirichlet_eps,
+            temp_init=temp_init,
+            temp_final=temp_final,
+            sample_p_after_temp=sample_p_after_temp,
+            clear_tree_every_move=clear_tree_every_move,
+            adjudicate_draw=adjudicate_draw,
+            draw_value_threshold=draw_value_threshold,
+            draw_plies=draw_plies,
+            draw_min_ply=draw_min_ply,
+            resign_threshold=resign_threshold,
+            resign_plies=resign_plies,
+            print_moves=True,
+            draw_value=draw_value,
+            repeat_penalty=repeat_penalty,
+            repeat_window=repeat_window,
+            workers=1,
+            net_channels=net_channels,
+            net_blocks=net_blocks,
+            net_amp=net_amp,
+            capture_bonus_scale=capture_bonus_scale,
+        )
+    
+    # Ensure output paths exist
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if pgn_out is not None:
+        pgn_out.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Set up wins and promos PGN paths (auto-derive if not specified)
+    wins_out_eff = pgn_wins_out
+    if wins_out_eff is None and pgn_out is not None:
+        wins_out_eff = pgn_out.with_name(pgn_out.stem + "_wins" + pgn_out.suffix)
+    
+    promos_out_eff = pgn_promos_out
+    if promos_out_eff is None and pgn_out is not None:
+        promos_out_eff = pgn_out.with_name(pgn_out.stem + "_promos" + pgn_out.suffix)
+    
+    # Distribute games across workers (round-robin for better interleaving)
+    game_indices_per_worker: list[list[int]] = [[] for _ in range(w)]
+    for i in range(total_games):
+        game_idx = game_index_base + i
+        worker_id = i % w
+        game_indices_per_worker[worker_id].append(game_idx)
+    
+    # Build job configs
+    jobs = []
+    for worker_id in range(w):
+        if not game_indices_per_worker[worker_id]:
+            continue
+        jobs.append({
+            "worker_id": worker_id,
+            "game_indices": game_indices_per_worker[worker_id],
+            "out_path": out_path,
+            "pgn_out": pgn_out,
+            "pgn_wins_out": wins_out_eff,
+            "pgn_promos_out": promos_out_eff,
+            "pgn_every": pgn_every,
+            "live_log": live_log,
+            "weights_path": weights_path,
+            "sims": sims,
+            "batch_size": batch_size,
+            "c_puct": c_puct,
+            "max_plies": max_plies,
+            "temp_plies": temp_plies,
+            "base_seed": seed,
+            "dirichlet_alpha": dirichlet_alpha,
+            "dirichlet_eps": dirichlet_eps,
+            "temp_init": temp_init,
+            "temp_final": temp_final,
+            "sample_p_after_temp": sample_p_after_temp,
+            "clear_tree_every_move": clear_tree_every_move,
+            "adjudicate_draw": adjudicate_draw,
+            "draw_value_threshold": draw_value_threshold,
+            "draw_plies": draw_plies,
+            "draw_min_ply": draw_min_ply,
+            "resign_threshold": resign_threshold,
+            "resign_plies": resign_plies,
+            "draw_value": draw_value,
+            "repeat_penalty": repeat_penalty,
+            "repeat_window": repeat_window,
+            "net_channels": net_channels,
+            "net_blocks": net_blocks,
+            "net_amp": net_amp,
+            "capture_bonus_scale": capture_bonus_scale,
+            "book_path": book_path,
+            "book_plies": book_plies,
+        })
+    
+    print(f"=== [{_ts_now()}] selfplay(streaming) start games={total_games} workers={w} ===", flush=True)
+    t0 = time.time()
+    
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=w) as pool:
+        results = pool.map(_streaming_worker_entry, jobs)
+    
+    total_written = sum(results)
+    print(f"=== [{_ts_now()}] selfplay(streaming) done games={total_games} workers={w} "
+          f"examples={total_written} elapsed={time.time() - t0:.1f}s ===", flush=True)
+    
+    return total_written
 
 
 if __name__ == "__main__":
