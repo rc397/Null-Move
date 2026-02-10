@@ -8,5 +8,3 @@ I have made a previous model before, but it is in a private repo, as it was an a
 
 I am planning to make it downloadable and playable locally/webhosted.
 
-This was obviously assisted with by LLM's (like ChatGPT) for the architecture and the training and datapipeline!!!
-
